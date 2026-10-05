@@ -5,6 +5,7 @@ import { initializeDatabase } from './utils/db'
 import { draftStore } from './stores/draftStore'
 import { blockStore } from './stores/blockStore'
 import { carverStore } from './stores/carverStore'
+import { occupancyStore } from './stores/occupancyStore'
 
 /**
  * svelte-spa-router@4 只支持 hash 路由（内部读写 `window.location.hash`）。
@@ -29,6 +30,7 @@ async function boot(): Promise<void> {
   bridgeDeepLink()
   try {
     await initializeDatabase()
+    await occupancyStore.init()
     await Promise.all([draftStore.load(), blockStore.load(), carverStore.load()])
   } catch {
     // 页面仍会挂载，并由各页空态提示本地数据不可用。

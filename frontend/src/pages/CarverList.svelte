@@ -4,6 +4,7 @@
   import StageRail from '../components/common/StageRail.svelte'
   import { blockStore } from '../stores/blockStore'
   import { carverStore } from '../stores/carverStore'
+  import { occupancyStore, occupancyRemainingLabel } from '../stores/occupancyStore'
   import { useCarverLoad } from '../hooks/useCarverLoad'
   import type { CarverSpecialty, SkillLevel } from '../types/carver'
   import { downloadJson } from '../utils/export'
@@ -12,6 +13,8 @@
   const specialties: CarverSpecialty[] = ['墨线', '套色', '修版']
   const levels: SkillLevel[] = ['学徒', '熟练', '师傅']
   const { activeCount: selectedActiveCount, averageDuration: selectedAverageDuration, refresh: refreshCarverLoad } = useCarverLoad('')
+  const activeOccupancies = occupancyStore.activeByBlock
+  const occupancyNow = occupancyStore.now
 
   let filter = $state<CarverSpecialty | '全部'>('全部')
   let selectedCarverId = $state('')
@@ -33,7 +36,7 @@
   )
 
   onMount(() => {
-    void Promise.all([blockStore.load(), carverStore.load()])
+    void Promise.all([blockStore.load(), carverStore.load(), occupancyStore.load()])
   })
 
   $effect(() => {
@@ -214,10 +217,11 @@
             <p class="gentle-copy">当前没有指派版片，可在版片编排台分派。</p>
           {:else}
             {#each selectedBlocks as block}
+              {@const occupancy = $activeOccupancies[block.id]}
               <div>
                 <span>{block.colorNo}</span>
                 <strong>{block.blockName}</strong>
-                <em>{block.state}</em>
+                <em>{block.state}{#if occupancy} · {occupancyRemainingLabel(occupancy, $occupancyNow)}{/if}</em>
               </div>
             {/each}
           {/if}

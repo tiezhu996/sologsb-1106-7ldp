@@ -4,8 +4,11 @@ import type { Block } from '../types/block'
 import type { Carver } from '../types/carver'
 import type { PrintBatch } from '../types/batch'
 import type { ProcessNode } from '../types/node'
+import type { BlockOccupancy, ClaimOp } from '../types/occupancy'
 
 type StoredRecord = Record<string, unknown> & { schemaRev?: number }
+
+export const SCHEMA_REV = 3
 
 class WoodprintDatabase extends Dexie {
   drafts!: Table<Draft, string>
@@ -13,6 +16,8 @@ class WoodprintDatabase extends Dexie {
   carvers!: Table<Carver, string>
   batches!: Table<PrintBatch, string>
   nodes!: Table<ProcessNode, string>
+  occupancies!: Table<BlockOccupancy, string>
+  claimOps!: Table<ClaimOp, string>
 
   constructor() {
     super('gbwoodprint-db')
@@ -39,6 +44,38 @@ class WoodprintDatabase extends Dexie {
           await transaction.table(tableName).toCollection().modify((record: StoredRecord) => {
             record.schemaRev = 2
           })
+        }
+      })
+
+    this.version(3)
+      .stores({
+        drafts: 'id, genre, status, title, schemaRev',
+        blocks: 'id, draftId, colorNo, carvedBy, state, schemaRev',
+        carvers: 'id, specialty, skillLevel, name, schemaRev',
+        batches: 'id, draftId, batchNo, printedAt, schemaRev',
+        nodes: 'id, batchId, blockId, stage, seq, operator, schemaRev',
+        occupancies: 'id, blockId, carverId, status, expiresAt, schemaRev',
+        claimOps: 'id, blockId, status, startedAt, schemaRev',
+      })
+      .upgrade(async (transaction) => {
+        const tableNames = ['drafts', 'blocks', 'carvers', 'batches', 'nodes'] as const
+        for (const tableName of tableNames) {
+          await transaction.table(tableName).toCollection().modify((record: StoredRecord) => {
+            record.schemaRev = SCHEMA_REV
+          })
+        }
+
+        // 兼容补录：已有刻工名字的旧版片补写长期有效的历史占用牌，不算新领取。
+        const carverRecords = (await transaction.table('carvers').toArray()) as Carver[]
+        const blockRecords = (await transaction.table('blocks').toArray()) as Block[]
+        const { occupancies: backfill, listFixes } = buildHistoricalOccupancies(carverRecords, blockRecords)
+        if (backfill.length > 0) await transaction.table('occupancies').bulkAdd(backfill)
+        for (const [carverId, blockIds] of Object.entries(listFixes)) {
+          const carver = carverRecords.find((item) => item.id === carverId)
+          if (!carver) continue
+          await transaction
+            .table('carvers')
+            .update(carverId, { activeBlockIds: [...new Set([...carver.activeBlockIds, ...blockIds])] })
         }
       })
   }
@@ -194,7 +231,53 @@ const nodes: ProcessNode[] = [
 ]
 
 function withSchemaRevision<T extends object>(records: T[]): Array<T & { schemaRev: number }> {
-  return records.map((record) => ({ ...record, schemaRev: 2 }))
+  return records.map((record) => ({ ...record, schemaRev: SCHEMA_REV }))
+}
+
+/**
+ * 按现有刻工名单与「在刻且留名」的旧版片补历史占用牌。
+ * 历史牌长期有效（expiresAt 为 null），只还原占用事实，不算新领取。
+ */
+function buildHistoricalOccupancies(
+  carverRecords: Carver[],
+  blockRecords: Block[],
+): { occupancies: BlockOccupancy[]; listFixes: Record<string, string[]> } {
+  const occupancies: BlockOccupancy[] = []
+  const listFixes: Record<string, string[]> = {}
+  const claimedBlockIds = new Set<string>()
+  const claimedAt = new Date().toISOString()
+
+  const push = (block: Block, carver: Carver): void => {
+    if (claimedBlockIds.has(block.id)) return
+    claimedBlockIds.add(block.id)
+    occupancies.push({
+      id: `occ-hist-${block.id}`,
+      blockId: block.id,
+      carverId: carver.id,
+      carverName: carver.name,
+      kind: '历史补录',
+      status: '生效中',
+      claimedAt,
+      expiresAt: null,
+      releasedAt: null,
+      schemaRev: SCHEMA_REV,
+    })
+  }
+
+  for (const carver of carverRecords) {
+    for (const blockId of carver.activeBlockIds) {
+      const block = blockRecords.find((item) => item.id === blockId)
+      if (block) push(block, carver)
+    }
+  }
+  for (const block of blockRecords) {
+    if (block.state !== '在刻' || !block.carvedBy || claimedBlockIds.has(block.id)) continue
+    const carver = carverRecords.find((item) => item.name === block.carvedBy)
+    if (!carver) continue
+    push(block, carver)
+    listFixes[carver.id] = [...(listFixes[carver.id] ?? []), block.id]
+  }
+  return { occupancies, listFixes }
 }
 
 export const db = new WoodprintDatabase()
@@ -206,6 +289,7 @@ db.on('populate', () => {
     db.carvers.bulkAdd(withSchemaRevision(carvers)),
     db.batches.bulkAdd(withSchemaRevision(batches)),
     db.nodes.bulkAdd(withSchemaRevision(nodes)),
+    db.occupancies.bulkAdd(buildHistoricalOccupancies(carvers, blocks).occupancies),
   ])
 })
 
@@ -214,12 +298,13 @@ export async function initializeDatabase(): Promise<void> {
   const draftCount = await db.drafts.count()
   if (draftCount > 0) return
 
-  await db.transaction('rw', db.drafts, db.blocks, db.carvers, db.batches, db.nodes, async () => {
+  await db.transaction('rw', [db.drafts, db.blocks, db.carvers, db.batches, db.nodes, db.occupancies], async () => {
     await db.drafts.bulkPut(withSchemaRevision(drafts))
     await db.blocks.bulkPut(withSchemaRevision(blocks))
     await db.carvers.bulkPut(withSchemaRevision(carvers))
     await db.batches.bulkPut(withSchemaRevision(batches))
     await db.nodes.bulkPut(withSchemaRevision(nodes))
+    await db.occupancies.bulkPut(buildHistoricalOccupancies(carvers, blocks).occupancies)
   })
 }
 

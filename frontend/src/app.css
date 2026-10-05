@@ -1185,3 +1185,49 @@ textarea:focus {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+.occupancy-tag {
+  display: grid;
+  gap: 0.15rem;
+  margin-bottom: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(47, 118, 88, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(47, 118, 88, 0.08);
+}
+
+.occupancy-tag strong {
+  color: var(--jade);
+}
+
+.occupancy-tag small {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+}
+
+.claim-cell select {
+  min-width: 9rem;
+}
+
+.recovery-panel {
+  margin-bottom: 1.5rem;
+  border-color: rgba(187, 132, 45, 0.45);
+  background: linear-gradient(135deg, rgba(255, 250, 240, 0.98), rgba(247, 238, 216, 0.95));
+}
+
+.recovery-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.7rem 1rem;
+  padding: 0.6rem 0;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.recovery-item p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  line-height: 1.6;
+}

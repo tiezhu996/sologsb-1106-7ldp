@@ -9,11 +9,13 @@
   import { blockStore } from '../stores/blockStore'
   import { carverStore } from '../stores/carverStore'
   import { draftStore } from '../stores/draftStore'
+  import { occupancyStore, occupancyRemainingLabel } from '../stores/occupancyStore'
   import { useBlockOrder } from '../hooks/useBlockOrder'
   import { useCarverLoad } from '../hooks/useCarverLoad'
   import { validateColorSequence } from '../utils/seq'
   import { db } from '../utils/db'
   import type { Block } from '../types/block'
+  import type { ClaimOp } from '../types/occupancy'
   import type { ProcessStage } from '../types/node'
 
   const draftId = $derived($params?.id ?? '')
@@ -24,9 +26,13 @@
     setDraft: setBlockDraft,
   } = useBlockOrder(draftId)
   const { activeCount: selectedActiveCount, averageDuration: selectedAverageDuration, refresh: refreshCarverLoad } = useCarverLoad('')
+  const activeOccupancies = occupancyStore.activeByBlock
+  const occupancyNow = occupancyStore.now
+  const recoveredOps = occupancyStore.recovered
 
   let sequenceDraft = $state<Record<string, number>>({})
   let defectDraft = $state<Record<string, string>>({})
+  let claimDraft = $state<Record<string, string>>({})
   let selectedCarverId = $state('')
   let notice = $state('')
   let lastSync = $state('刚刚')
@@ -34,7 +40,7 @@
   const draft = $derived($draftStore.find((item) => item.id === draftId) ?? null)
 
   onMount(() => {
-    void Promise.all([draftStore.load(), blockStore.load(), carverStore.load()])
+    void Promise.all([draftStore.load(), blockStore.load(), carverStore.load(), occupancyStore.load()])
   })
 
   $effect(() => {
@@ -50,9 +56,13 @@
 
   $effect(() => {
     const firstCarver = $carverStore[0]
-    if (!selectedCarverId && firstCarver) {
+    if (!firstCarver) return
+    if (!selectedCarverId) {
       selectedCarverId = firstCarver.id
       void refreshCarverLoad(firstCarver.id)
+    }
+    for (const block of $orderedBlocks) {
+      if (claimDraft[block.id] === undefined) claimDraft[block.id] = firstCarver.id
     }
   })
 
@@ -65,17 +75,36 @@
     return $orderedBlocks.filter((block) => block.id !== exceptId).map((block) => block.colorNo)
   }
 
-  async function assignCarver(block: Block, carverName: string): Promise<void> {
-    const carver = $carverStore.find((item) => item.name === carverName)
-    if (!carver) return
-    await carverStore.assignBlock(block, carver.id)
-    await blockStore.load()
-    lastSync = `已把${block.blockName}指派给刻工`
+  function blockNameOf(blockId: string): string {
+    return $blockStore.find((item) => item.id === blockId)?.blockName ?? blockId
+  }
+
+  async function claimBlock(block: Block): Promise<void> {
+    const carverId = claimDraft[block.id]
+    if (!carverId) {
+      notice = '请先选择要领用的刻工。'
+      return
+    }
+    const result = await occupancyStore.claim(block, carverId)
+    notice = result.message
+    if (result.ok) lastSync = `${block.blockName}占用牌已挂出`
+  }
+
+  async function returnBlock(block: Block): Promise<void> {
+    const result = await occupancyStore.release(block)
+    notice = result.message
+    if (result.ok) lastSync = `${block.blockName}占用牌已交回`
+  }
+
+  function continueDraft(op: ClaimOp): void {
+    if (op.carverId) claimDraft[op.blockId] = op.carverId
+    occupancyStore.dismissRecovered(op.id)
+    notice = `已恢复「${blockNameOf(op.blockId)}」的领用草稿，确认刻工后点领用。`
   }
 
   async function markCarved(block: Block): Promise<void> {
     await blockStore.update(block.id, { state: '已刻成' })
-    await carverStore.releaseBlock(block.id)
+    const released = await occupancyStore.release(block, { keepCarvedBy: true })
     const currentBlocks = get(blockStore).filter((item) => item.draftId === draftId)
     const allCarved = currentBlocks.every((item) => item.state === '已刻成' || item.state === '已修版')
     await draftStore.update(draftId, { status: allCarved ? '可印' : '刻版中' })
@@ -92,6 +121,7 @@
       note: '版片验线后标记刻成。',
     })
     lastSync = `${block.blockName}已标记刻成`
+    if (!released.ok) notice = released.message
   }
 
   async function saveSequence(block: Block): Promise<void> {
@@ -174,6 +204,35 @@
     <div><span>需修版片</span><strong>{$orderedBlocks.filter((block) => block.defectNote).length}</strong></div>
   </section>
 
+  {#if $recoveredOps.length > 0}
+    <section class="panel recovery-panel" data-testid="recovery-panel">
+      <div class="panel-heading">
+        <div>
+          <span class="section-kicker">中断恢复</span>
+          <h2>有未写完的领用或交回，已恢复原占用</h2>
+        </div>
+      </div>
+      {#each $recoveredOps as op (op.id)}
+        <div class="recovery-item">
+          <p>
+            {#if op.kind === '领取'}
+              「{blockNameOf(op.blockId)}」领用给{op.carverName || '未选刻工'}的操作中断，
+            {:else}
+              「{blockNameOf(op.blockId)}」的交回操作中断，
+            {/if}
+            占用牌与刻工名单已还原。
+          </p>
+          <div class="inline-actions">
+            {#if op.kind === '领取' && op.carverId}
+              <button class="mini-button strong" data-testid={`continue-${op.id}`} type="button" onclick={() => continueDraft(op)}>继续办理</button>
+            {/if}
+            <button class="mini-button" type="button" onclick={() => occupancyStore.dismissRecovered(op.id)}>知道了</button>
+          </div>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
   <div class="workbench-grid">
     <section class="panel table-panel wide-panel">
       <div class="panel-heading">
@@ -194,13 +253,14 @@
                 <th>色序</th>
                 <th>版片</th>
                 <th>木料 / 版厚</th>
-                <th>刻工指派</th>
+                <th>领用 / 占用牌</th>
                 <th>状态</th>
                 <th>崩口与修补</th>
               </tr>
             </thead>
             <tbody>
               {#each $orderedBlocks as block, blockIndex (block.id)}
+                {@const occupancy = $activeOccupancies[block.id]}
                 <tr data-testid="row-block">
                   <td class="sequence-cell">
                     {#if sequenceDraft[block.id] !== undefined}
@@ -224,17 +284,25 @@
                     <strong>{block.woodType}</strong>
                     <small>{block.thicknessMm} mm</small>
                   </td>
-                  <td>
-                    <select
-                      data-testid={`field-carvedBy-${block.id}`}
-                      value={block.carvedBy}
-                      onchange={(event) => assignCarver(block, (event.currentTarget as HTMLSelectElement).value)}
-                    >
-                      <option value="">待指派</option>
-                      {#each $carverStore as carver}
-                        <option value={carver.name}>{carver.name} · {carver.specialty}</option>
-                      {/each}
-                    </select>
+                  <td class="claim-cell">
+                    {#if block.state === '已刻成' || block.state === '已修版'}
+                      <strong>{block.carvedBy || '未留名'}</strong>
+                      <small>{block.state} · 无需领用</small>
+                    {:else if occupancy}
+                      <div class="occupancy-tag" data-testid={`occupancy-${block.id}`}>
+                        <strong>{occupancy.carverName}</strong>
+                        <small>{occupancyRemainingLabel(occupancy, $occupancyNow)}</small>
+                        <small>{occupancy.kind === '历史补录' ? '历史补录 · 不算新领' : '两小时占用牌'}</small>
+                      </div>
+                      <button class="mini-button" data-testid={`release-${block.id}`} type="button" onclick={() => returnBlock(block)}>交回</button>
+                    {:else}
+                      <select data-testid={`field-carvedBy-${block.id}`} bind:value={claimDraft[block.id]}>
+                        {#each $carverStore as carver}
+                          <option value={carver.id}>{carver.name} · {carver.specialty}</option>
+                        {/each}
+                      </select>
+                      <button class="mini-button strong" data-testid={`claim-${block.id}`} type="button" onclick={() => claimBlock(block)}>领用</button>
+                    {/if}
                   </td>
                   <td>
                     <span class="tag state-{block.state}">{block.state}</span>
@@ -292,6 +360,7 @@
         <strong>{$selectedAverageDuration}</strong>
         <small>分钟</small>
       </div>
+      <p class="gentle-copy">领用即挂两小时占用牌，一块版同时只认一张；期满或交回后名单撤下，版片仍算在刻，下一位可重新领用。</p>
       {#if notice}<p class="notice">{notice}</p>{/if}
       <a class="button secondary full" use:link href="/carvers">查看刻工档与分布</a>
     </aside>

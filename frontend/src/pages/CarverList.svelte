@@ -3,7 +3,8 @@
   import EmptyBox from '../components/common/EmptyBox.svelte'
   import StageRail from '../components/common/StageRail.svelte'
   import { blockStore } from '../stores/blockStore'
-  import { carverStore } from '../stores/carverStore'
+  import { carverStore, carverAssignments } from '../stores/carverStore'
+  import { occupationStore } from '../stores/occupationStore'
   import { useCarverLoad } from '../hooks/useCarverLoad'
   import type { CarverSpecialty, SkillLevel } from '../types/carver'
   import { downloadJson } from '../utils/export'
@@ -26,14 +27,23 @@
     $carverStore.filter((carver) => filter === '全部' || carver.specialty === filter),
   )
   const selectedCarver = $derived($carverStore.find((carver) => carver.id === selectedCarverId) ?? null)
+  const heldBlockIds = $derived(
+    selectedCarver ? ($carverAssignments[selectedCarver.id] ?? []) : [],
+  )
   const selectedBlocks = $derived(
     selectedCarver
-      ? [...$blockStore].filter((block) => selectedCarver.activeBlockIds.includes(block.id) || block.carvedBy === selectedCarver.name)
+      ? [...$blockStore].filter(
+          (block) => heldBlockIds.includes(block.id) || block.carvedBy === selectedCarver.name,
+        )
       : [],
   )
+  /** 有效占用牌挂在名下的才算当班负担；旧档署名只算历史 */
+  function heldCount(carverId: string): number {
+    return ($carverAssignments[carverId] ?? []).length
+  }
 
   onMount(() => {
-    void Promise.all([blockStore.load(), carverStore.load()])
+    void Promise.all([blockStore.load(), carverStore.load(), occupationStore.load()])
   })
 
   $effect(() => {
@@ -186,7 +196,7 @@
             </div>
           </div>
           <div class="carver-metrics">
-            <div><span>在刻</span><strong>{carver.activeBlockIds.length}</strong><small>块</small></div>
+            <div><span>在刻（有效占用牌）</span><strong data-testid={`held-count-${carver.id}`}>{heldCount(carver.id)}</strong><small>块</small></div>
             <div><span>专长</span><strong>{carver.specialty}</strong></div>
           </div>
           <p class="piece-note">{carver.pieceworkNote}</p>
@@ -217,7 +227,7 @@
               <div>
                 <span>{block.colorNo}</span>
                 <strong>{block.blockName}</strong>
-                <em>{block.state}</em>
+                <em>{heldBlockIds.includes(block.id) ? '占用中' : block.state}</em>
               </div>
             {/each}
           {/if}

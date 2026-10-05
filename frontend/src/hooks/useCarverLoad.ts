@@ -8,12 +8,12 @@ export function useCarverLoad(carverId: string) {
   const averageDuration = writable(0)
   let requestNumber = 0
 
+  // 刻工负担 = 有效占用牌挂在其名下的版片数（期满或交回后自动撤下）
   const activeCount = derived(
-    [selectedCarverId, carverStore.assignments, blockStore],
-    ([$carverId, $assignments, $blocks]) => {
+    [selectedCarverId, carverStore.assignments],
+    ([$carverId, $assignments]) => {
       if (!$carverId) return 0
-      const assignedIds = $assignments[$carverId] ?? []
-      return $blocks.filter((block) => assignedIds.includes(block.id) && block.state === '在刻').length
+      return ($assignments[$carverId] ?? []).length
     },
   )
 

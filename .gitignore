@@ -7,3 +7,5 @@ dist/
 .vscode/
 output/
 test-results/
+scripts/.build/
+scripts/_test*.mjs

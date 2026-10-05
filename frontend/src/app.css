@@ -1185,3 +1185,72 @@ textarea:focus {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* 两小时占用牌 */
+.claim-cell {
+  min-width: 11rem;
+}
+
+.token-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: #faf6ec;
+}
+
+.token-card.held {
+  border-style: solid;
+  border-color: var(--jade);
+  background: rgba(47, 118, 88, 0.08);
+}
+
+.token-card.free select {
+  width: 100%;
+}
+
+.token-holder {
+  font-weight: 800;
+  color: var(--jade);
+}
+
+.token-card small {
+  color: var(--ink-soft);
+  line-height: 1.35;
+}
+
+.token-history {
+  font-size: 0.7rem;
+}
+
+/* 中断恢复横幅 */
+.recovery-panel {
+  margin-bottom: 1.5rem;
+  border-color: var(--cinnabar);
+  background: rgba(169, 52, 39, 0.05);
+}
+
+.recovery-row {
+  border-top: 1px solid var(--line);
+  padding: 0.8rem 0.25rem 0.4rem;
+}
+
+.recovery-row p {
+  font-weight: 800;
+  color: var(--cinnabar-dark);
+}
+
+.recovery-row small {
+  display: block;
+  margin: 0.25rem 0 0.6rem;
+  color: var(--ink-soft);
+}
+
+.recovery-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}

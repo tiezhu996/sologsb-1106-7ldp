@@ -2,11 +2,27 @@ import { derived, writable } from 'svelte/store'
 import type { Carver } from '../types/carver'
 import type { Block } from '../types/block'
 import { db } from '../utils/db'
+import { occupationStore } from './occupationStore'
+import { isActiveOccupation } from '../utils/occupation'
 
 const carverList = writable<Carver[]>([])
-const blockAssignments = writable<Record<string, string[]>>({})
 
-const assignmentSummary = derived(blockAssignments, ($assignments) => {
+/** 刻工当班名单以「有效期内的占用牌」为唯一事实来源；期满/交回即撤下 */
+export const carverAssignments = derived(
+  [occupationStore, occupationStore.nowTick],
+  ([$occupations, now]) => {
+    const assignments: Record<string, string[]> = {}
+    for (const occupation of $occupations) {
+      if (!isActiveOccupation(occupation, now) || !occupation.holderCarverId) continue
+      const ids = assignments[occupation.holderCarverId] ?? []
+      ids.push(occupation.blockId)
+      assignments[occupation.holderCarverId] = ids
+    }
+    return assignments
+  },
+)
+
+const assignmentSummary = derived(carverAssignments, ($assignments) => {
   const summary: Record<string, number> = {}
   for (const blockIds of Object.values($assignments)) {
     for (const blockId of blockIds) {
@@ -16,17 +32,10 @@ const assignmentSummary = derived(blockAssignments, ($assignments) => {
   return summary
 })
 
-function syncAssignments(records: Carver[]): void {
-  const assignments: Record<string, string[]> = {}
-  for (const carver of records) assignments[carver.id] = [...carver.activeBlockIds]
-  blockAssignments.set(assignments)
-}
-
 async function load(): Promise<void> {
   const records = await db.carvers.toArray()
   records.sort((a, b) => a.specialty.localeCompare(b.specialty, 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN'))
   carverList.set(records)
-  syncAssignments(records)
 }
 
 async function create(input: Omit<Carver, 'id'>): Promise<string> {
@@ -41,44 +50,20 @@ async function update(id: string, changes: Partial<Omit<Carver, 'id'>>): Promise
   await load()
 }
 
+/** 兼容旧调用：转成领取两小时占用牌（一块版同时只认一张牌） */
 async function assignBlock(block: Block, carverId: string): Promise<void> {
-  const nextCarver = await db.carvers.get(carverId)
-  if (!nextCarver) return
-
-  await db.transaction('rw', db.blocks, db.carvers, async () => {
-    const allCarvers = await db.carvers.toArray()
-    for (const carver of allCarvers) {
-      const withoutBlock = carver.activeBlockIds.filter((id) => id !== block.id)
-      if (carver.id === carverId) {
-        await db.carvers.update(carver.id, { activeBlockIds: [...withoutBlock, block.id] })
-      } else if (withoutBlock.length !== carver.activeBlockIds.length) {
-        await db.carvers.update(carver.id, { activeBlockIds: withoutBlock })
-      }
-    }
-    await db.blocks.update(block.id, {
-      carvedBy: nextCarver.name,
-      state: block.state === '待刻' ? '在刻' : block.state,
-    })
-  })
-  await load()
+  await occupationStore.claim(block, carverId)
 }
 
+/** 交回占用牌：名单撤下，版片仍算在刻 */
 async function releaseBlock(blockId: string): Promise<void> {
-  const allCarvers = await db.carvers.toArray()
-  await db.transaction('rw', db.carvers, async () => {
-    for (const carver of allCarvers) {
-      if (!carver.activeBlockIds.includes(blockId)) continue
-      await db.carvers.update(carver.id, {
-        activeBlockIds: carver.activeBlockIds.filter((id) => id !== blockId),
-      })
-    }
-  })
-  await load()
+  const block = await db.blocks.get(blockId)
+  if (block) await occupationStore.returnBlock(block)
 }
 
 export const carverStore = {
   subscribe: carverList.subscribe,
-  assignments: { subscribe: blockAssignments.subscribe },
+  assignments: carverAssignments,
   assignmentSummary,
   load,
   create,

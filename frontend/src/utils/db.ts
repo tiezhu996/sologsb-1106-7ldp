@@ -4,6 +4,7 @@ import type { Block } from '../types/block'
 import type { Carver } from '../types/carver'
 import type { PrintBatch } from '../types/batch'
 import type { ProcessNode } from '../types/node'
+import type { OccupationHistoryEntry, OccupationRecord } from '../types/occupation'
 
 type StoredRecord = Record<string, unknown> & { schemaRev?: number }
 
@@ -13,6 +14,9 @@ class WoodprintDatabase extends Dexie {
   carvers!: Table<Carver, string>
   batches!: Table<PrintBatch, string>
   nodes!: Table<ProcessNode, string>
+  occupations!: Table<OccupationRecord, string>
+  occupationOps!: Table<import('../types/occupation').OccupationOperation, string>
+  workbenchDrafts!: Table<import('../types/occupation').WorkbenchDraft, string>
 
   constructor() {
     super('gbwoodprint-db')
@@ -39,6 +43,43 @@ class WoodprintDatabase extends Dexie {
           await transaction.table(tableName).toCollection().modify((record: StoredRecord) => {
             record.schemaRev = 2
           })
+        }
+      })
+
+    // version(3)：占用牌（occupations）、操作意向（occupationOps）、编排台草稿（workbenchDrafts）
+    this.version(3)
+      .stores({
+        drafts: 'id, genre, status, title, schemaRev',
+        blocks: 'id, draftId, colorNo, carvedBy, state, schemaRev',
+        carvers: 'id, specialty, skillLevel, name, schemaRev',
+        batches: 'id, draftId, batchNo, printedAt, schemaRev',
+        nodes: 'id, batchId, blockId, stage, seq, operator, schemaRev',
+        occupations: 'blockId, status, holderCarverId, expiresAt',
+        occupationOps: 'id, blockId, draftId, status, kind',
+        workbenchDrafts: 'draftId',
+      })
+      .upgrade(async (transaction) => {
+        const tableNames = ['drafts', 'blocks', 'carvers', 'batches', 'nodes'] as const
+        for (const tableName of tableNames) {
+          await transaction.table(tableName).toCollection().modify((record: StoredRecord) => {
+            record.schemaRev = 3
+          })
+        }
+
+        // 已有刻工名字的旧版片补历史占用：关闭态、不发新牌、不挂当班名单，不算新领取
+        const blockRecords = await transaction.table<Block, string>('blocks').toArray()
+        const carverRecords = await transaction.table<Carver, string>('carvers').toArray()
+        const carverIdsByName = new Map(carverRecords.map((carver) => [carver.name, carver.id]))
+        const legacyOccupations = buildLegacyOccupations(blockRecords, carverIdsByName)
+        if (legacyOccupations.length > 0) {
+          await transaction.table<OccupationRecord, string>('occupations').bulkAdd(legacyOccupations)
+          const legacyBlockIds = new Set(legacyOccupations.map((item) => item.blockId))
+          await transaction
+            .table<Carver, string>('carvers')
+            .toCollection()
+            .modify((carver) => {
+              carver.activeBlockIds = carver.activeBlockIds.filter((id) => !legacyBlockIds.has(id))
+            })
         }
       })
   }
@@ -111,7 +152,7 @@ const carvers: Carver[] = [
     name: '齐师傅',
     specialty: '墨线',
     skillLevel: '师傅',
-    activeBlockIds: ['block-mk-01'],
+    activeBlockIds: [],
     pieceworkNote: '主刻人物面部与衣纹，按成版幅面计件，修版另计。',
   },
   {
@@ -119,7 +160,7 @@ const carvers: Carver[] = [
     name: '周桂枝',
     specialty: '套色',
     skillLevel: '熟练',
-    activeBlockIds: ['block-ms-02', 'block-zw-02'],
+    activeBlockIds: [],
     pieceworkNote: '擅刻花叶与织物底纹，每版完成后交管事验线。',
   },
   {
@@ -193,9 +234,52 @@ const nodes: ProcessNode[] = [
   { id: 'node-ll-02', blockId: 'block-ll-01', stage: '修版', seq: 2, operator: '秦木生', startedAt: '2025-12-11T14:00', durationMin: 110, note: '鱼鳞线加修，边缘改圆顺。' },
 ]
 
-function withSchemaRevision<T extends object>(records: T[]): Array<T & { schemaRev: number }> {
-  return records.map((record) => ({ ...record, schemaRev: 2 }))
+/**
+ * 为已有刻工署名的旧版片补一张「历史占用」：
+ * 牌处于关闭态（在刻/待刻记为 expired，已完成记为 returned），
+ * 无持有人、无到期时间，任何统计都不视作新领取。
+ */
+export function buildLegacyOccupations(
+  blockRecords: Block[],
+  carverIdsByName: Map<string, string>,
+): OccupationRecord[] {
+  return blockRecords
+    .filter((block) => block.carvedBy.trim().length > 0)
+    .map((block) => {
+      const carverName = block.carvedBy
+      const carverId = carverIdsByName.get(carverName) ?? `legacy-carver:${carverName}`
+      const historyEntry: OccupationHistoryEntry = {
+        seq: 1,
+        kind: 'legacy',
+        carverId,
+        carverName,
+        claimedAt: null,
+        expiresAt: null,
+        endedAt: null,
+        endReason: 'legacy',
+        note: `旧档补登：版片原刻工署名「${carverName}」，按历史占用保留，不计新领取。`,
+      }
+      return {
+        blockId: block.id,
+        status: block.state === '已刻成' || block.state === '已修版' ? 'returned' : 'expired',
+        holderCarverId: null,
+        holderCarverName: null,
+        claimedAt: null,
+        expiresAt: null,
+        releasedAt: null,
+        history: [historyEntry],
+      } satisfies OccupationRecord
+    })
 }
+
+const CURRENT_SCHEMA_REV = 3
+
+function withSchemaRevision<T extends object>(records: T[]): Array<T & { schemaRev: number }> {
+  return records.map((record) => ({ ...record, schemaRev: CURRENT_SCHEMA_REV }))
+}
+
+const seedCarverIdsByName = new Map(carvers.map((carver) => [carver.name, carver.id]))
+const occupationsSeed = buildLegacyOccupations(blocks, seedCarverIdsByName)
 
 export const db = new WoodprintDatabase()
 
@@ -206,6 +290,7 @@ db.on('populate', () => {
     db.carvers.bulkAdd(withSchemaRevision(carvers)),
     db.batches.bulkAdd(withSchemaRevision(batches)),
     db.nodes.bulkAdd(withSchemaRevision(nodes)),
+    db.occupations.bulkAdd(occupationsSeed),
   ])
 })
 
@@ -214,13 +299,25 @@ export async function initializeDatabase(): Promise<void> {
   const draftCount = await db.drafts.count()
   if (draftCount > 0) return
 
-  await db.transaction('rw', db.drafts, db.blocks, db.carvers, db.batches, db.nodes, async () => {
-    await db.drafts.bulkPut(withSchemaRevision(drafts))
-    await db.blocks.bulkPut(withSchemaRevision(blocks))
-    await db.carvers.bulkPut(withSchemaRevision(carvers))
-    await db.batches.bulkPut(withSchemaRevision(batches))
-    await db.nodes.bulkPut(withSchemaRevision(nodes))
-  })
+  await db.transaction(
+    'rw',
+    [
+      db.drafts,
+      db.blocks,
+      db.carvers,
+      db.batches,
+      db.nodes,
+      db.occupations,
+    ],
+    async () => {
+      await db.drafts.bulkPut(withSchemaRevision(drafts))
+      await db.blocks.bulkPut(withSchemaRevision(blocks))
+      await db.carvers.bulkPut(withSchemaRevision(carvers))
+      await db.batches.bulkPut(withSchemaRevision(batches))
+      await db.nodes.bulkPut(withSchemaRevision(nodes))
+      await db.occupations.bulkPut(occupationsSeed)
+    },
+  )
 }
 
 export type { WoodprintDatabase }
